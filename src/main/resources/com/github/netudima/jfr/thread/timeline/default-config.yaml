@@ -1,0 +1,219 @@
+# jfr-thread-timeline - default state configuration
+#
+# A thread's state at any moment is decided by the frames on its stack at that moment.
+# Every entry under `states` is one coloured band on the timeline.
+#
+# Pattern syntax for `frames`:
+#   plain text     substring match against "pkg.Class.method"   e.g. java.net.Socket
+#   =text          the frame must be exactly `text`
+#   with * or ?    glob over the whole frame                    e.g. sun.nio.ch.*.read0
+#   re:regex       Java regular expression, unanchored          e.g. re:^org\.example\..*\.handle$
+#
+# Native frames from async-profiler look like "libjvm.so.ObjectMonitor::enter" and
+# match the same way.
+
+# innermost   - walk the stack leaf -> root, the first matching frame decides (default).
+#               A socket read inside a lock section is reported as a socket read.
+# config-order- the first rule listed below that matches anywhere in the stack decides.
+matchStrategy: innermost
+
+# Frames kept per stack for the hover tooltip.
+maxStackDepth: 64
+
+fallback:
+  # When no rule matches, colour the thread by the state JFR itself recorded.
+  useThreadState: true
+  # Used when no rule matches and no thread state is available.
+  name: Other
+  color: "#c4c4c4"
+  threadStateColors:
+    Running: "#7f9f6f"
+    Runnable: "#7f9f6f"
+    Native: "#9aa89a"
+    Sleeping: "#d9d9d9"
+    Blocked: "#c98b8b"
+    Waiting: "#cfc8b8"
+    Parked: "#c6bdd6"
+    Unknown: "#c4c4c4"
+
+# threads:
+#   include: ["worker-*", "re:^main$"]
+#   exclude: ["C1 CompilerThre*", "C2 CompilerThre*"]
+
+# Threads are bucketed by name into collapsible groups, first match wins, file order preserved.
+# Patterns use the same syntax as `frames` above. Anything unclaimed lands in `ungroupedName`.
+# Add your own pools here - that is usually the first thing worth customising.
+ungroupedName: Application
+
+threadGroups:
+  - name: GC
+    threads:
+      - "re:^(GC Thread|G1 |G1Conc|Shenandoah|Z Worker|ZWorker|ZDriver|Parallel GC|PSGC|CMS|Concurrent Mark)"
+      - "re:^(VM Thread|VM Periodic Task)"
+
+  - name: JIT compiler
+    threads:
+      - "re:^(C[12] CompilerThre|CompilerThread|Sweeper thread|Common-Cleaner)"
+
+  - name: Event loop / NIO
+    threads:
+      - "re:^(epoll|nio|kqueue|wepoll)EventLoopGroup"
+      - "re:^(Selector|NioProcessor|Acceptor|Netty)"
+
+  - name: JVM internal
+    threads:
+      - "re:^(Reference Handl|Finalizer|Signal Dispatch|Notification Thread|Attach Listener)"
+      - "re:^(Service Thread|process reaper|DestroyJavaVM|Monitor Deflation|JFR |Async-profiler)"
+      - "re:^\\[tid="
+
+  - name: JMX / management
+    threads:
+      - "re:^(JMX|RMI)"
+
+states:
+  - name: Socket read
+    color: "#4e79a7"
+    description: Blocked in a read from a socket
+    frames:
+      - java.net.SocketInputStream.socketRead0
+      - java.net.SocketInputStream.read
+      - sun.nio.ch.SocketDispatcher.read0
+      - sun.nio.ch.NioSocketImpl.tryRead
+      - sun.nio.ch.SocketChannelImpl.read
+      - sun.nio.ch.IOUtil.readIntoNativeBuffer
+      - io.netty.channel.unix.FileDescriptor.readAddress
+      - io.netty.channel.unix.Socket.recv
+      # libc / libpthread: recv, __recv, __libc_recv, recvfrom, recvmsg, ...
+      - "re:^lib.*\\.(__)?(GI_+)?(libc_)?recv(from|msg|mmsg)?$"
+
+  - name: Socket write
+    color: "#76b7b2"
+    description: Writing to a socket
+    frames:
+      - java.net.SocketOutputStream.socketWrite0
+      - sun.nio.ch.SocketDispatcher.write0
+      - sun.nio.ch.NioSocketImpl.tryWrite
+      - sun.nio.ch.SocketChannelImpl.write
+      - sun.nio.ch.IOUtil.writeFromNativeBuffer
+      - io.netty.channel.unix.FileDescriptor.writeAddress
+      - io.netty.channel.unix.Socket.send
+      - io.netty.channel.unix.Socket.writev
+      - "re:^lib.*\\.(__)?(GI_+)?(libc_)?send(to|msg|mmsg|file(64)?)?$"
+
+  - name: File read
+    color: "#59a14f"
+    description: Reading from a file
+    frames:
+      - java.io.FileInputStream.readBytes
+      - java.io.RandomAccessFile.readBytes
+      - sun.nio.ch.FileDispatcherImpl.read0
+      - sun.nio.ch.FileDispatcherImpl.pread0
+      - sun.nio.ch.FileChannelImpl.read
+      - java.nio.channels.FileChannel.read
+      # read / __read / pread / pread64 / readv / __read_nocancel ...
+      - "re:^lib.*\\.(__)?(GI_+)?(libc_)?p?read(v|64|_nocancel|_chk)*$"
+      - "re:^lib.*\\.(__)?(GI_+)?posix_fadvise\\w*$"
+
+  - name: File write
+    color: "#8cd17d"
+    description: Writing to or syncing a file
+    frames:
+      - java.io.FileOutputStream.writeBytes
+      - java.io.RandomAccessFile.writeBytes
+      - sun.nio.ch.FileDispatcherImpl.write0
+      - sun.nio.ch.FileDispatcherImpl.pwrite0
+      - sun.nio.ch.FileDispatcherImpl.force0
+      - sun.nio.ch.FileChannelImpl.force
+      - java.io.FileDescriptor.sync
+      - "re:^lib.*\\.(__)?(GI_+)?(libc_)?p?write(v|64|_nocancel)*$"
+      - "re:^lib.*\\.(__)?(GI_+)?(fsync|fdatasync|msync|sync_file_range)\\w*$"
+
+  - name: Selector / epoll wait
+    color: "#9c755f"
+    description: Idle in a selector waiting for I/O readiness
+    frames:
+      - sun.nio.ch.EPoll.wait
+      - sun.nio.ch.KQueue.poll
+      - sun.nio.ch.WEPoll.wait
+      - sun.nio.ch.EPollArrayWrapper.epollWait
+      - sun.nio.ch.Net.poll
+      - sun.nio.ch.SelectorImpl.select
+      - io.netty.channel.epoll.Native.epollWait
+
+  - name: Lock wait (park)
+    color: "#e15759"
+    description: Parked on a j.u.c lock, queue or future
+    frames:
+      - jdk.internal.misc.Unsafe.park
+      - sun.misc.Unsafe.park
+      - java.util.concurrent.locks.LockSupport.park
+      - libjvm*.Unsafe_Park
+      - libjvm*.Parker::park
+
+  - name: Monitor blocked
+    color: "#b0413e"
+    description: Blocked entering a synchronized block
+    frames:
+      - libjvm*.ObjectMonitor::enter
+      - libjvm*.ObjectSynchronizer::
+      - libjvm*.InterpreterRuntime::monitorenter
+      - libjvm*.SharedRuntime::complete_monitor_locking_C
+
+  - name: Object.wait
+    color: "#f28e2b"
+    description: Waiting on a monitor via Object.wait()
+    frames:
+      - java.lang.Object.wait
+      - libjvm*.ObjectMonitor::wait
+      - libjvm*.JVM_MonitorWait
+
+  - name: Sleep
+    color: "#bab0ac"
+    description: Thread.sleep()
+    frames:
+      - java.lang.Thread.sleep
+      - libjvm*.JVM_Sleep
+      - libc*.nanosleep
+
+  - name: GC
+    color: "#ff9da7"
+    description: Garbage collection work
+    frames:
+      - "re:libjvm.*\\.(G1|Shenandoah|ZHeap|ZDriver|ZWorker|PSScavenge|PSParallelCompact|ParallelScavenge|GenCollectedHeap|CMSCollector|SerialHeap)"
+      - libjvm*.GCTaskThread::
+      - libjvm*.VM_GC_Operation::
+      - libjvm*.ReferenceProcessor::
+      - libjvm*.CardTableBarrierSet::
+
+  - name: JIT compilation
+    color: "#b07aa1"
+    description: The JIT compiler threads
+    frames:
+      - libjvm*.CompileBroker::
+      - libjvm*.Compilation::
+      - libjvm*.Compile::
+      - libjvm*.C2Compiler::
+      - libjvm*.Compiler::compile_method
+      - libjvm*.PhaseIterGVN::
+      - libjvm*.PhaseChaitin::
+
+  - name: Class loading
+    color: "#edc948"
+    description: Loading, parsing or linking classes
+    frames:
+      - java.lang.ClassLoader.loadClass
+      - java.lang.ClassLoader.defineClass
+      - libjvm*.SystemDictionary::
+      - libjvm*.ClassFileParser::
+      - libjvm*.ClassLoader::
+
+  - name: Allocation
+    color: "#d4a6c8"
+    description: Slow-path heap allocation
+    frames:
+      - libjvm*.MemAllocator::
+      - libjvm*.CollectedHeap::
+      - libjvm*.InstanceKlass::allocate
+      - libjvm*.OptoRuntime::new_instance_C
+      - libjvm*.OptoRuntime::new_array_C
+      - libjvm*.Runtime1::new_instance

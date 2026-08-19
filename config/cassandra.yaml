@@ -1,0 +1,259 @@
+# A ready-made configuration for a Cassandra node: thread groups for its pools, and states
+# that say why a thread is parked rather than just that it is.
+#
+#   java -jar jfr-thread-timeline.jar -c config/cassandra.yaml profile.jfr
+#
+# Best used on a wall-clock recording (asprof -e wall), where blocked threads are sampled.
+# On such a profile most of the wall time is LockSupport.park, and a single-frame rule paints
+# all of it one colour - an idle worker and a query stuck on a slow replica look identical.
+# A *sequence* separates them by also requiring a frame further down the stack. A real parked
+# read, frame indices as the tool reports them:
+#
+#    3  jdk.internal.misc.Unsafe.park                   <- step 1 of every sequence below
+#    4  java.util.concurrent.locks.LockSupport.parkNanos
+#    5  ...utils.concurrent.WaitQueue$Standard$AbstractSignal.awaitUntil
+#    8  ...service.reads.ReadCallback.awaitUntil        <- step 2: waiting on a replica read
+#    9  ...service.reads.AbstractReadExecutor.shouldSpeculateAndMaybeWait
+#   11  ...service.StorageProxy.fetchRows
+#
+# Steps match innermost first and gaps between them are allowed, so you only name the frames
+# that carry meaning - not the whole stack.
+
+title: Cassandra
+
+matchStrategy: innermost
+
+# THE ONE THING TO GET RIGHT: every rule that competes for the same park must start from the
+# SAME set of innermost frames. `innermost` picks whichever rule matched nearest the leaf, and
+# the stack above has two park frames stacked on top of each other. If the catch-all named
+# Unsafe.park (3) while a sequence started at LockSupport.park (4), the catch-all would anchor
+# one frame nearer the leaf and win every sample - the sequence would silently report 0%.
+#
+# So the park alternatives are defined once below with a YAML anchor and reused by every rule,
+# including the catch-all. All park rules then anchor at the same depth and plain config order
+# decides: specific sequences first, catch-all last.
+#
+# If you get this wrong the tool tells you: it warns when a state matched samples but never won
+# any of them, and names the rule that took them.
+
+# Threads are bucketed into groups by name, first match wins. Groups start collapsed, each
+# drawn as a summary band: per pixel column, how its threads split across states, with the bar
+# height being the share of the pool observed at all. Twenty idle workers collapse to one thin
+# line; the moment they all start reading, the band fills up. Click a group to expand it.
+ungroupedName: Other
+
+# This list is both the display order and the match order (first match wins), so it is
+# arranged with the groups you look at first at the top. That is safe here only because no
+# two groups can claim the same thread - CassandraConfigTest pins that down. If you add a
+# broad pattern, put it below the specific ones it would otherwise swallow.
+threadGroups:
+  - name: Netty event loops
+    threads: ["re:^(epoll|nio)EventLoopGroup", "re:^Messaging-(EventLoop|AcceptLoop)"]
+
+  # Everything running on a SharedExecutorPool. The naming moved around between releases:
+  # 3.x used SharedPool-Worker-N, 4.x named the worker after the stage it was serving
+  # (MutationStage-N), and 5.x splits into per-purpose pools (RequestPool-Worker-N).
+  # GossipStage is SEP-backed too but is broken out below, where it is more useful.
+  - name: SEP shared pool
+    threads:
+      - "re:^[A-Za-z]+Pool-Worker-"     # RequestPool / ReadPool / MutatePool / ResponsePool / SharedPool
+      - "re:^SEP-Worker-"
+      - "re:^(ReadStage|MutationStage|ViewMutationStage|CounterMutationStage|RequestResponseStage)"
+      - "re:^Native-Transport-Requests"
+
+  - name: GC
+    threads:
+      - "re:^(GC Thread|G1 |Shenandoah|Z Worker|ZWorker|Parallel GC|Concurrent Mark)"
+      - "re:^(VM Thread|VM Periodic Task)"
+
+  - name: Memtable flush
+    threads:
+      - "re:^(MemtableFlushWriter|MemtablePostFlush|MemtableReclaimMemory)"
+      - "re:^PerDiskMemtableFlushWriter"
+      - "re:^SlabPoolCleaner"          # reclaims memtable slabs, so it belongs with flush
+
+  - name: Compaction
+    threads:
+      - "re:^CompactionExecutor"
+      - "re:^CompactionLogger"
+      - "re:^(SecondaryIndexManagement|IndexSummaryManager)"
+
+  - name: Commitlog
+    threads: ["re:^COMMIT-LOG", "re:^CommitLog", "re:^PERIODIC-COMMIT-LOG"]
+
+  - name: Hints
+    # Batchlog replay is grouped here as the other "a write still owed to a replica" path.
+    threads: ["re:^(Hints|HintedHandoff|Batchlog)"]
+
+  - name: Repair & validation
+    threads:
+      - "re:^(Repair|AntiEntropyStage|ValidationExecutor)"
+      # streaming also carries bootstrap and decommission, but on a steady-state
+      # cluster it is overwhelmingly repair
+      - "re:^(Stream|NettyStreaming)"
+
+  - name: Accord
+    # Accord (CEP-15) thread names vary by version, and these patterns could not be checked
+    # against a node with Accord enabled - they are a deliberately broad prefix match. If your
+    # node names them differently the threads land in `Other`; expand that group, or run
+    # --top-unmatched, to see what to add here.
+    threads:
+      - "re:^[Aa]ccord"
+      - "re:^CommandStore"
+
+  - name: Gossip & cluster
+    threads: ["re:^(Gossip|MigrationStage|PendingRangeCalculator)"]
+
+  - name: JIT compiler
+    threads: ["re:^(C[12] CompilerThre|CompilerThread|Sweeper thread|Common-Cleaner)"]
+
+  - name: JVM internal
+    threads:
+      - "re:^(Reference Handl|Finalizer|Signal Dispatch|Notification Thread|Attach Listener)"
+      - "re:^(Service Thread|process reaper|DestroyJavaVM|Monitor Deflation|JFR |Async-profiler)"
+      - "re:^\\[tid="
+
+  - name: JMX / management
+    threads: ["re:^(JMX|RMI)"]
+
+# Not a setting - the tool ignores unknown top-level keys. It exists only to define the YAML
+# anchor that every park rule below reuses as its innermost step.
+_park_frames: &park
+  - jdk.internal.misc.Unsafe.park
+  - sun.misc.Unsafe.park
+  - java.util.concurrent.locks.LockSupport.park   # substring, so parkNanos matches too
+
+states:
+  # ---- read path ----------------------------------------------------------
+  - name: Read replica wait
+    color: "#4e79a7"
+    description: Coordinator parked waiting for replicas to answer a read
+    sequences:
+      - [*park, "ReadCallback.awaitUntil"]
+      - [*park, "AbstractReadExecutor.awaitResponses"]
+      - [*park, "AbstractReadExecutor.shouldSpeculateAndMaybeWait"]
+
+  - name: Digest mismatch repair
+    color: "#a0cbe8"
+    description: Parked in a read-repair round trip after a digest mismatch
+    sequences:
+      - [*park, "ReadRepair"]
+      - [*park, "DataResolver"]
+
+  # ---- write path ---------------------------------------------------------
+  - name: Write replica wait
+    color: "#17becf"
+    description: Parked waiting for replicas to acknowledge a write
+    sequences:
+      - [*park, "AbstractWriteResponseHandler.get"]
+      - [*park, "StorageProxy.mutateWithTriggers"]
+
+  - name: Memtable shard lock
+    color: "#8c564b"
+    description: Parked contending for a memtable shard while applying a mutation
+    sequences:
+      - [*park, "TrieMemtable$MemtableShard.put"]
+      - [*park, "AbstractMemtableWithCommitlog.put"]
+
+  - name: Memtable allocation backpressure
+    color: "#c49c94"
+    description: Parked waiting for memtable memory to be reclaimed
+    sequences:
+      - [*park, "MemtableAllocator$SubAllocator.allocate"]
+      - [*park, "MemtablePool$SubPool.tryAllocate"]
+
+  - name: Commitlog sync wait
+    color: "#9edae5"
+    description: Parked waiting for the commit log to become durable
+    sequences:
+      - [*park, "AbstractCommitLogService.awaitSyncAt"]
+      - [*park, "CommitLogSegment.waitForSync"]
+
+  # ---- not real work ------------------------------------------------------
+  - name: Worker idle
+    color: "#d9d9d9"
+    description: SEPWorker or a pool thread parked with nothing to do
+    sequences:
+      - [*park, "SEPWorker.doWaitSpin"]
+      - [*park, "SEPWorker.run"]
+      - [*park, "ThreadPoolExecutor.getTask"]
+      - [*park, "LinkedBlockingQueue.take"]
+
+  # Catch-all for every remaining park. Must stay after the specific sequences above.
+  - name: Lock wait (park)
+    color: "#e15759"
+    description: Parked for some other reason
+    frames: *park
+
+  # ---- the usual non-park states -----------------------------------------
+  # Compaction, flush and GC are deliberately not states here: they are thread groups
+  # above. A CompactionExecutor thread is always compacting, so painting it "Compaction"
+  # says nothing - what you want to know is whether it is reading, writing or blocked.
+
+  - name: LZ4
+    color: "#59a14f"
+    description: Compressing or decompressing with LZ4
+    frames:
+      # the JNI library is extracted to a temp file, so its name carries a random suffix
+      - "re:^liblz4"
+      - net.jpountz.lz4.
+      - org.apache.cassandra.io.compress.LZ4Compressor
+      - io.netty.handler.codec.compression.Lz4
+
+  - name: Caffeine cache
+    color: "#ff9da7"
+    description: Key/row/auth cache lookups, inserts and eviction maintenance
+    frames:
+      - org.apache.cassandra.cache.CaffeineCache
+      # the library itself, so the state anchors on the leaf frame rather than on
+      # Cassandra's wrapper several frames further out
+      - com.github.benmanes.caffeine.cache.
+
+  - name: Epoll wakeup
+    color: "#b07aa1"
+    description: Poking an event loop awake through its eventfd
+    frames:
+      - io.netty.channel.epoll.EpollEventLoop.wakeup
+      - io.netty.channel.epoll.Native.eventFdWrite
+      - sun.nio.ch.EPollSelectorImpl.wakeup
+      - sun.nio.ch.EPoll.wakeup
+      # matched end-anchored: a bare "wakeup" would also catch __condvar_confirm_wakeup
+      - "re:^lib.*\\.eventfd_write$"
+
+  - name: Socket read
+    color: "#86bcb6"
+    frames:
+      - sun.nio.ch.SocketDispatcher.read0
+      - sun.nio.ch.NioSocketImpl.tryRead
+      - io.netty.channel.unix.FileDescriptor.readAddress
+      - "re:^lib.*\\.(__)?(libc_)?recv(from|msg)?$"
+
+  - name: Socket write
+    color: "#76b7b2"
+    frames:
+      - sun.nio.ch.SocketDispatcher.write0
+      - io.netty.channel.unix.Socket.send
+      - io.netty.channel.unix.FileDescriptor.writeAddress
+      - "re:^lib.*\\.(__)?(libc_)?send(to|msg)?$"
+
+  - name: Selector / epoll wait
+    color: "#9c755f"
+    frames:
+      - sun.nio.ch.EPoll.wait
+      - io.netty.channel.epoll.Native.epollWait
+      - sun.nio.ch.SelectorImpl.select
+
+  - name: File read
+    color: "#8cd17d"
+    frames:
+      - sun.nio.ch.FileDispatcherImpl.pread0
+      - sun.nio.ch.FileDispatcherImpl.read0
+      - "re:^lib.*\\.(__)?(libc_)?p?read(v|64)?$"
+
+  - name: File write
+    color: "#f1ce63"
+    frames:
+      - sun.nio.ch.FileDispatcherImpl.write0
+      - sun.nio.ch.FileDispatcherImpl.force0
+      - "re:^lib.*\\.(__)?(libc_)?p?write(v|64)?$"
+      - "re:^lib.*\\.(f|fdata)sync$"

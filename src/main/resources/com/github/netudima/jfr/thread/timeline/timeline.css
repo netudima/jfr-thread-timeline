@@ -1,0 +1,400 @@
+:root {
+  --bg: #ffffff;
+  --bg-alt: #f6f7f9;
+  --bg-row: #fbfbfc;
+  --fg: #1c2128;
+  --fg-dim: #61697a;
+  --border: #d9dde3;
+  --border-strong: #b9c0ca;
+  --accent: #2f6feb;
+  --tip-bg: #ffffff;
+  --shadow: 0 6px 24px rgba(20, 24, 33, .18);
+  --sel: rgba(47, 111, 235, .16);
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --bg-alt: #1b1f26;
+    --bg-row: #181c22;
+    --fg: #e6e9ef;
+    --fg-dim: #98a1b0;
+    --border: #2c323b;
+    --border-strong: #414a56;
+    --accent: #64a0ff;
+    --tip-bg: #1b1f26;
+    --shadow: 0 6px 24px rgba(0, 0, 0, .55);
+    --sel: rgba(100, 160, 255, .2);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* `hidden` must win over the display rules below */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* everything except the scroller keeps its natural height */
+#hdr, #legendBar, #overviewWrap, #axis, #status { flex: 0 0 auto; }
+
+/* ---- header ---- */
+
+#hdr {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+#title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .1px;
+}
+
+#meta {
+  margin-top: 2px;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+}
+
+#meta b { font-weight: 600; color: var(--fg); }
+#meta span + span::before { content: " · "; opacity: .55; }
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.controls input[type="search"], .controls select, .controls button {
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 4px 7px;
+  height: 26px;
+}
+
+.controls input[type="search"] { width: 210px; }
+.controls select { max-width: 210px; }
+
+.controls button {
+  cursor: pointer;
+  min-width: 28px;
+}
+
+.controls button:hover { border-color: var(--accent); color: var(--accent); }
+
+.chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ---- legend ---- */
+
+#legendBar {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.legendctl {
+  display: flex;
+  gap: 3px;
+  flex: none;
+  padding-top: 1px;
+}
+
+.legendctl button {
+  font: inherit;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 2px 9px;
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.legendctl button:hover { border-color: var(--accent); color: var(--accent); }
+
+#legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  max-height: 96px;
+  overflow-y: auto;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  cursor: pointer;
+  font-size: 11.5px;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.chip:hover { border-color: var(--border-strong); }
+.chip.off { opacity: .38; }
+.chip .sw { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+.chip .pc { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+
+/* ---- chart area ---- */
+
+#overviewWrap {
+  position: relative;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+#overview { display: block; width: 100%; height: 42px; cursor: ew-resize; }
+
+#overviewHint {
+  position: absolute;
+  right: 8px;
+  top: 3px;
+  font-size: 10px;
+  color: var(--fg-dim);
+  pointer-events: none;
+  opacity: .75;
+}
+
+#axis { display: block; width: 100%; height: 22px; border-bottom: 1px solid var(--border); }
+
+#scroller {
+  position: relative;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+#chart {
+  position: sticky;
+  top: 0;
+  display: block;
+  width: 100%;
+  z-index: 1;
+  cursor: default;
+}
+
+#chart.panning { cursor: grabbing !important; }
+
+#spacer { width: 1px; }
+
+/* ---- footer ---- */
+
+#status {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-alt);
+  color: var(--fg-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#statusLeft { font-variant-numeric: tabular-nums; }
+
+/* ---- tooltip ---- */
+
+#tooltip {
+  position: fixed;
+  z-index: 20;
+  max-width: 640px;
+  padding: 8px 10px;
+  background: var(--tip-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+  font-size: 11.5px;
+}
+
+#tooltip .tth { font-weight: 600; margin-bottom: 3px; }
+
+#tooltip .ttstate {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+#tooltip .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+#tooltip .ttmeta { color: var(--fg-dim); margin: 2px 0 6px; font-variant-numeric: tabular-nums; }
+
+#tooltip .stack {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  max-height: 340px;
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
+
+#tooltip .stack div { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+#tooltip .stack .hit { background: var(--sel); border-radius: 3px; font-weight: 600; }
+#tooltip .more { color: var(--fg-dim); font-style: italic; }
+
+#tooltip .grouptotals {
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+#tooltip .grouptotals div { display: flex; align-items: center; gap: 5px; }
+
+/* ---- details / config panels ---- */
+
+#config {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(760px, 62vw);
+  z-index: 31;
+  display: flex;
+  flex-direction: column;
+  background: var(--tip-bg);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+}
+
+#cbody {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 2;
+}
+
+#details {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(620px, 52vw);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: var(--tip-bg);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+}
+
+.dhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+.dbtns { display: flex; gap: 6px; }
+
+.dbtns button {
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.dbtns button:hover { border-color: var(--accent); color: var(--accent); }
+
+#dbody {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+#dbody .meta { font-family: inherit; color: var(--fg-dim); margin-bottom: 8px; }
+#dbody .frame { white-space: pre-wrap; word-break: break-word; }
+#dbody .frame.hit { background: var(--sel); border-radius: 3px; font-weight: 600; }
+#dbody .idx { color: var(--fg-dim); }
+
+/* ---- boot ---- */
+
+#boot {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  z-index: 50;
+}
+
+.bootbox { text-align: center; color: var(--fg-dim); }
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  margin: 0 auto 10px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+#bootmsg.err {
+  color: #d1495b;
+  max-width: 620px;
+  text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+}

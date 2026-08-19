@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}} &middot; thread timeline</title>
+<style>{{CSS}}</style>
+</head>
+<body>
+<div id="app" hidden>
+  <header id="hdr">
+    <div class="titlebox">
+      <h1 id="title">{{TITLE}}</h1>
+      <div id="meta"></div>
+    </div>
+    <div class="controls">
+      <input id="filter" type="search" spellcheck="false" placeholder="filter threads — text or /regex/">
+      <select id="sort" title="Thread order"></select>
+      <label class="chk" id="groupWrap"><input type="checkbox" id="grouped" checked> group threads</label>
+      <label class="chk"><input type="checkbox" id="activeOnly"> active in view</label>
+      <button id="zoomOut" title="Zoom out (S or -)">&minus;</button>
+      <button id="zoomIn" title="Zoom in (W or +)">+</button>
+      <button id="reset" title="Reset zoom (double-click the chart, or 0)">Reset</button>
+      <button id="showConfig" title="Show the configuration this report was rendered with (C)">Config</button>
+    </div>
+  </header>
+
+  <div id="legendBar">
+    <div class="legendctl">
+      <button id="legendAll" title="Show every state">all</button>
+      <button id="legendNone" title="Hide every state (N)">none</button>
+    </div>
+    <div id="legend"></div>
+  </div>
+
+  <div id="overviewWrap">
+    <canvas id="overview"></canvas>
+    <div id="overviewHint">whole recording — drag to select a range</div>
+  </div>
+
+  <canvas id="axis"></canvas>
+
+  <div id="scroller">
+    <canvas id="chart"></canvas>
+    <div id="spacer"></div>
+  </div>
+
+  <footer id="status">
+    <span id="statusLeft"></span>
+    <span id="statusRight">drag: select a time range &middot; shift+drag: pan &middot; wheel: scroll &middot; ctrl/⌘+wheel or pinch: zoom &middot; double-click: reset &middot; alt-click a state: show only it</span>
+  </footer>
+</div>
+
+<div id="tooltip" hidden></div>
+
+<aside id="details" hidden>
+  <div class="dhead">
+    <strong id="dtitle"></strong>
+    <span class="dbtns"><button id="dcopy">Copy stack</button><button id="dclose" title="Close (Esc)">&times;</button></span>
+  </div>
+  <div id="dbody"></div>
+</aside>
+
+<aside id="config" hidden>
+  <div class="dhead">
+    <strong id="ctitle"></strong>
+    <span class="dbtns"><button id="ccopy">Copy config</button><button id="cclose" title="Close (Esc)">&times;</button></span>
+  </div>
+  <pre id="cbody"></pre>
+</aside>
+
+<div id="boot">
+  <div class="bootbox">
+    <div class="spinner"></div>
+    <div id="bootmsg">Decoding timeline data…</div>
+  </div>
+</div>
+
+<script id="tl-data" type="application/x-jfr-timeline" data-mode="{{DATA_MODE}}">{{DATA}}</script>
+<script>{{JS}}</script>
+</body>
+</html>
