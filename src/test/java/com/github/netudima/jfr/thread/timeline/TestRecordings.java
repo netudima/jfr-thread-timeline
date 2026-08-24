@@ -13,8 +13,8 @@ final class TestRecordings {
 
     static Recording empty() {
         Recording rec = new Recording();
-        rec.eventTypeNames.add("test.Sample");
-        rec.usedEventTypes.add("test.Sample");
+        rec.eventTypeNames.add("jdk.ExecutionSample");
+        rec.usedEventTypes.add("jdk.ExecutionSample");
         return rec;
     }
 

@@ -14,10 +14,19 @@
       <div id="meta"></div>
     </div>
     <div class="controls">
+      <select id="viewMode" hidden title="Rows are threads, or the CPU cores they ran on">
+        <option value="threads">view: threads</option>
+        <option value="cores">view: cpu cores</option>
+      </select>
+      <select id="coreColor" hidden title="What the colour of a slice means">
+        <option value="group">colour: thread group</option>
+        <option value="thread">colour: thread</option>
+        <option value="state">colour: state</option>
+      </select>
       <input id="filter" type="search" spellcheck="false" placeholder="filter threads — text or /regex/">
       <select id="sort" title="Thread order"></select>
       <label class="chk" id="groupWrap"><input type="checkbox" id="grouped" checked> group threads</label>
-      <label class="chk"><input type="checkbox" id="activeOnly"> active in view</label>
+      <label class="chk" id="activeOnlyWrap"><input type="checkbox" id="activeOnly"> active in view</label>
       <button id="zoomOut" title="Zoom out (S or -)">&minus;</button>
       <button id="zoomIn" title="Zoom in (W or +)">+</button>
       <button id="reset" title="Reset zoom (double-click the chart, or 0)">Reset</button>

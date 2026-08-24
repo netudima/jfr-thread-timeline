@@ -6,15 +6,26 @@
 
   var D = null;             // raw model from the embedded payload
   var threads = [];         // decoded per-thread timelines
+  var coreRows = [];        // decoded per-core rows, present only with --record-cpu
   var stateColors = [];
   var stateNames = [];
+  var threadColors = [];
+  var groupColors = [];
   var theme = {};
+
+  var GROUP_PALETTE = [
+    '#4e79a7', '#f28e2b', '#59a14f', '#e15759', '#b07aa1', '#76b7b2',
+    '#edc948', '#9c755f', '#ff9da7', '#86bcb6', '#d37295', '#8cd17d'
+  ];
 
   var S = {
     t0: 0, t1: 1,           // visible time window, microseconds from recording start
     span: 1,                // full recording span
     rowH: 16,
     groupH: 28,          // group headers are taller: their summary band carries real detail
+    coreH: 20,
+    view: 'threads',     // 'threads' | 'cores'
+    coreColor: 'group',  // what a slice's colour means: group | thread | state
     rowY: null,          // cumulative row offsets, so heights can differ per row
     totalH: 0,
     gutterW: 250,
@@ -24,7 +35,9 @@
     activeOnly: false,
     grouped: true,
     collapsed: new Set(),
-    hidden: new Set(),
+    hidden: new Set(),        // hidden state indices
+    hiddenGroups: new Set(),  // hidden thread groups, core view coloured by group
+    hiddenThreads: new Set(), // hidden threads, core view coloured by thread
     rows: [],            // display rows: group headers and thread rows
     visibleThreads: [],  // the threads behind them, flat
     hoverRow: -1,
@@ -91,6 +104,44 @@
       };
     });
     D.threads = null;
+
+    // one hue per thread, spaced by the golden angle so neighbours stay distinguishable
+    threadColors = threads.map(function (t, i) {
+      return 'hsl(' + ((i * 137.508) % 360).toFixed(1) + ' 52% ' + (46 + (i % 3) * 9) + '%)';
+    });
+    groupColors = (D.groups || []).map(function (g, i) { return GROUP_PALETTE[i % GROUP_PALETTE.length]; });
+
+    if (D.cores && D.cores.rows) {
+      coreRows = D.cores.rows.map(function (flat, i) {
+        var n = flat.length / 6;
+        var start = new Float64Array(n), end = new Float64Array(n);
+        var thread = new Int32Array(n), state = new Int32Array(n);
+        var stack = new Int32Array(n), samples = new Int32Array(n);
+        var cur = 0;
+        for (var k = 0, p = 0; k < n; k++, p += 6) {
+          cur += flat[p];
+          start[k] = cur;
+          end[k] = cur + flat[p + 1];
+          thread[k] = flat[p + 2];
+          state[k] = flat[p + 3];
+          stack[k] = flat[p + 4];
+          samples[k] = flat[p + 5];
+        }
+        return { coreId: D.cores.ids[i], start: start, end: end, thread: thread,
+                 state: state, stack: stack, samples: samples, n: n };
+      });
+      D.cores.rows = null;
+    }
+  }
+
+  function hasCores() { return coreRows.length > 0; }
+
+  /** Colour of one core slice under the current colouring mode. */
+  function sliceColor(row, k) {
+    if (S.coreColor === 'state') { return stateColors[row.state[k]]; }
+    if (S.coreColor === 'thread') { return threadColors[row.thread[k]] || '#9aa0a6'; }
+    var t = threads[row.thread[k]];
+    return (t && t.group >= 0 && groupColors[t.group]) ? groupColors[t.group] : '#9aa0a6';
   }
 
   function sum(a) { var s = 0; for (var i = 0; i < a.length; i++) { s += a[i]; } return s; }
@@ -239,6 +290,22 @@
   }
 
   function rebuildRows() {
+    if (S.view === 'cores') {
+      S.visibleThreads = threads;
+      S.rows = coreRows.map(function (row) { return { core: row }; });
+      measureRows();
+      var totalCores = Math.max(S.totalH, viewH);
+      $('spacer').style.height = totalCores + 'px';
+      $('spacer').style.marginTop = (-viewH) + 'px';
+      if (scroller.scrollTop > totalCores - viewH) {
+        scroller.scrollTop = Math.max(0, totalCores - viewH);
+      }
+      overviewCache = null;
+      renderLegend();
+      updateStatus();
+      return;
+    }
+
     var re = compileFilter(S.filter);
     // a thread matches the filter by its own name or by the group it belongs to
     var list = threads.filter(function (t) {
@@ -306,7 +373,7 @@
     var y = 0;
     for (var i = 0; i < n; i++) {
       ys[i] = y;
-      y += S.rows[i].group !== undefined ? S.groupH : S.rowH;
+      y += S.rows[i].group !== undefined ? S.groupH : (S.rows[i].core ? S.coreH : S.rowH);
     }
     ys[n] = y;
     S.rowY = ys;
@@ -343,6 +410,9 @@
   }
 
   function niceStep(raw) {
+    if (!(raw > 0) || !isFinite(raw)) {
+      return 0;                       // log10(0) is -Infinity, which would yield a zero step
+    }
     var mag = Math.pow(10, Math.floor(Math.log10(raw)));
     var n = raw / mag;
     var s = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
@@ -352,8 +422,15 @@
   function ticks() {
     var span = S.t1 - S.t0;
     var step = niceStep(span / Math.max(2, Math.floor(plotW / 110)));
+    // A zero or non-finite step would make the loop below never advance. Guard it rather than
+    // trusting the arithmetic: this runs on every frame, and a hang here freezes the whole page.
+    if (!(step > 0) || !isFinite(step) || !isFinite(S.t0) || !isFinite(S.t1)) {
+      return [];
+    }
     var out = [];
-    for (var t = Math.ceil(S.t0 / step) * step; t <= S.t1; t += step) { out.push(t); }
+    for (var t = Math.ceil(S.t0 / step) * step; t <= S.t1 && out.length < 1000; t += step) {
+      out.push(t);
+    }
     return out;
   }
 
@@ -430,6 +507,8 @@
       }
       if (row.group !== undefined) {
         drawGroupBand(row.members, y, rh);
+      } else if (row.core) {
+        drawCoreRow(row.core, y, rh);
       } else {
         drawRow(row.thread, y, rh);
       }
@@ -470,6 +549,9 @@
         cctx.fillText(row2.members.length + (row2.members.length === 1 ? ' thread' : ' threads'),
           10 + labelW, yy + rh2 / 2);
         cctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      } else if (row2.core) {
+        cctx.fillStyle = r2 === S.hoverRow ? theme.fg : theme.fgDim;
+        cctx.fillText('cpu ' + row2.core.coreId, 6, yy + rh2 / 2);
       } else {
         cctx.fillStyle = r2 === S.hoverRow ? theme.fg : theme.fgDim;
         cctx.fillText(row2.thread.name, S.grouped && hasGroups() ? 18 : 6, yy + rh2 / 2);
@@ -562,6 +644,47 @@
         } else {
           flush();
           bx = px; bw = wpx; bstate = st;
+        }
+      }
+    }
+    flush();
+  }
+
+  /** One CPU core: the threads that occupied it, coloured by whoever held it. */
+  function drawCoreRow(row, y, rowH) {
+    var t0 = S.t0, t1 = S.t1, scale = plotW / (t1 - t0);
+    var barY = y + 1, barH = rowH - 2;
+    var bx = -1, bw = 0, bcol = null;
+
+    function flush() {
+      if (bx >= 0) {
+        cctx.fillStyle = bcol;
+        cctx.fillRect(bx, barY, 1, barH);
+        bx = -1; bw = 0; bcol = null;
+      }
+    }
+
+    for (var k = firstSegmentAfter(row, t0); k < row.n; k++) {
+      var s = row.start[k];
+      if (s >= t1) { break; }
+      if (sliceHidden(row, k)) { continue; }
+      var a = s < t0 ? t0 : s;
+      var b = row.end[k] > t1 ? t1 : row.end[k];
+      if (b <= a) { continue; }
+      var x0 = S.gutterW + (a - t0) * scale;
+      var wpx = S.gutterW + (b - t0) * scale - x0;
+      var col = sliceColor(row, k);
+      if (wpx >= 1) {
+        flush();
+        cctx.fillStyle = col;
+        cctx.fillRect(x0, barY, wpx, barH);
+      } else {
+        var px = x0 | 0;
+        if (px === bx) {
+          if (wpx > bw) { bw = wpx; bcol = col; }
+        } else {
+          flush();
+          bx = px; bw = wpx; bcol = col;
         }
       }
     }
@@ -695,31 +818,119 @@
   // ---------------------------------------------------------------- legend
 
   /** Repaints the on/off state of the chips without rebuilding them. */
+  /**
+   * The legend shows states, thread groups or threads depending on the view and the colour
+   * mode, so toggling has to act on whichever of those is on screen. Each keeps its own hidden
+   * set, so switching colour mode does not lose what you had folded away.
+   */
+  function activeHiddenSet() {
+    if (S.view === 'cores' && S.coreColor === 'group') { return S.hiddenGroups; }
+    if (S.view === 'cores' && S.coreColor === 'thread') { return S.hiddenThreads; }
+    return S.hidden;
+  }
+
+  /** Every key the current legend can show, so "none" and solo know the whole universe. */
+  function activeKeys() {
+    var keys = [];
+    var i;
+    if (S.view === 'cores' && S.coreColor === 'group') {
+      keys.push(-1);                                   // the ungrouped bucket
+      for (i = 0; i < (D.groups || []).length; i++) { keys.push(i); }
+      return keys;
+    }
+    if (S.view === 'cores' && S.coreColor === 'thread') {
+      for (i = 0; i < threads.length; i++) { keys.push(i); }
+      return keys;
+    }
+    for (i = 0; i < stateNames.length; i++) { keys.push(i); }
+    return keys;
+  }
+
   function syncLegend() {
+    var set = activeHiddenSet();
     var chips = $('legend').querySelectorAll('.chip');
     for (var i = 0; i < chips.length; i++) {
-      chips[i].classList.toggle('off', S.hidden.has(+chips[i].dataset.s));
+      var key = +chips[i].dataset.s;
+      if (isFinite(key)) { chips[i].classList.toggle('off', set.has(key)); }
     }
   }
 
   function setAllHidden(hidden) {
-    S.hidden.clear();
+    var set = activeHiddenSet();
+    set.clear();
     if (hidden) {
-      for (var i = 0; i < stateNames.length; i++) { S.hidden.add(i); }
+      activeKeys().forEach(function (k) { set.add(k); });
     }
     syncLegend();
     overviewCache = null;
     requestDraw();
   }
 
-  /** Shows only one state; running it again on the same state brings everything back. */
+  /** Shows only one legend entry; running it again on the same one brings everything back. */
   function soloState(idx) {
-    var alreadySolo = S.hidden.size === stateNames.length - 1 && !S.hidden.has(idx);
+    var set = activeHiddenSet();
+    var alreadySolo = set.size === activeKeys().length - 1 && !set.has(idx);
     setAllHidden(!alreadySolo);
-    if (!alreadySolo) { S.hidden.delete(idx); syncLegend(); requestDraw(); }
+    if (!alreadySolo) { set.delete(idx); syncLegend(); requestDraw(); }
+  }
+
+  /** True when a core slice should not be drawn under the current legend selection. */
+  function sliceHidden(row, k) {
+    if (S.hidden.has(row.state[k])) { return true; }
+    if (S.coreColor === 'thread') { return S.hiddenThreads.has(row.thread[k]); }
+    if (S.coreColor === 'group') {
+      var t = threads[row.thread[k]];
+      return S.hiddenGroups.has(t ? t.group : -1);
+    }
+    return false;
+  }
+
+  /** In the core view the colours mean groups or threads, so the legend must follow. */
+  function renderCoreLegend() {
+    if (S.coreColor === 'state') {
+      return false;
+    }
+    var busy = {};
+    var grand = 0;
+    for (var c = 0; c < coreRows.length; c++) {
+      var row = coreRows[c];
+      for (var k = 0; k < row.n; k++) {
+        if (S.hidden.has(row.state[k])) { continue; }
+        var t = threads[row.thread[k]];
+        var key = S.coreColor === 'thread' ? row.thread[k] : (t ? t.group : -1);
+        var dur = row.end[k] - row.start[k];
+        busy[key] = (busy[key] || 0) + dur;
+        grand += dur;
+      }
+    }
+    var keys = Object.keys(busy).sort(function (a, b) { return busy[b] - busy[a]; });
+    var limit = S.coreColor === 'thread' ? 24 : keys.length;
+    var html = '';
+    for (var i = 0; i < keys.length && i < limit; i++) {
+      var key = +keys[i];
+      var name = S.coreColor === 'thread'
+        ? (threads[key] ? threads[key].name : '?')
+        : ((D.groups && D.groups[key]) || 'ungrouped');
+      var col = S.coreColor === 'thread'
+        ? (threadColors[key] || '#9aa0a6')
+        : (groupColors[key] || '#9aa0a6');
+      html += '<span class="chip' + (activeHiddenSet().has(key) ? ' off' : '') + '" data-s="' + key +
+        '" title="' + esc(name + ' — ' + fmtDur(busy[key]) + ' of cpu time') + '">' +
+        '<span class="sw" style="background:' + esc(col) + '"></span>' +
+        esc(name) + ' <span class="pc">' + (grand ? (100 * busy[key] / grand).toFixed(1) : '0.0') +
+        '%</span></span>';
+    }
+    if (keys.length > limit) {
+      html += '<span class="chip" style="opacity:.6">… ' + (keys.length - limit) + ' more</span>';
+    }
+    $('legend').innerHTML = html;
+    return true;
   }
 
   function renderLegend() {
+    if (S.view === 'cores' && renderCoreLegend()) {
+      return;
+    }
     var totals = new Float64Array(stateNames.length);
     var grand = 0;
     for (var r = 0; r < S.visibleThreads.length; r++) {
@@ -799,16 +1010,25 @@
     return out;
   }
 
-  function showTip(evt, t, k) {
-    var st = t.state[k];
-    var html = '<div class="tth">' + esc(t.name) + '</div>' +
+  /** {@code src} is set when the hit came from a core row rather than the thread's own row. */
+  function showTip(evt, t, k, src) {
+    var row = src || t;
+    var st = row.state[k];
+    var heading = esc(t ? t.name : 'unknown thread');
+    if (src) {
+      heading += ' <span class="pc">on cpu ' + src.coreId + '</span>';
+      if (t && t.group >= 0 && D.groups && D.groups[t.group]) {
+        heading += ' <span class="pc">· ' + esc(D.groups[t.group]) + '</span>';
+      }
+    }
+    var html = '<div class="tth">' + heading + '</div>' +
       '<div class="ttstate"><span class="sw" style="background:' + esc(stateColors[st]) + '"></span>' +
       esc(stateNames[st]) + '</div>' +
-      '<div class="ttmeta">' + fmtTime(t.start[k]) + ' → ' + fmtTime(t.end[k]) +
-      '  ·  ' + fmtDur(t.end[k] - t.start[k]) +
-      '  ·  ' + fmtCount(t.samples[k]) + (t.samples[k] === 1 ? ' sample' : ' samples') +
-      (D.meta.startEpochMs ? '  ·  ' + fmtWall(t.start[k]) : '') + '</div>' +
-      '<div class="stack">' + stackHtml(t.stack[k], 24) + '</div>';
+      '<div class="ttmeta">' + fmtTime(row.start[k]) + ' → ' + fmtTime(row.end[k]) +
+      '  ·  ' + fmtDur(row.end[k] - row.start[k]) +
+      '  ·  ' + fmtCount(row.samples[k]) + (row.samples[k] === 1 ? ' sample' : ' samples') +
+      (D.meta.startEpochMs ? '  ·  ' + fmtWall(row.start[k]) : '') + '</div>' +
+      '<div class="stack">' + stackHtml(row.stack[k], 24) + '</div>';
     tip.innerHTML = html;
     tip.hidden = false;
     var pad = 14;
@@ -860,21 +1080,24 @@
 
   // ---------------------------------------------------------- details panel
 
-  function showDetails(t, k) {
-    S.pinned = { t: t, k: k };
-    var st = t.state[k];
-    var frames = D.stacks[t.stack[k]] || [];
-    var hits = hitsOf(t.stack[k]);
-    $('dtitle').textContent = t.name + ' — ' + stateNames[st];
+  function showDetails(t, k, src) {
+    var row = src || t;
+    S.pinned = { t: t, k: k, row: row };
+    var st = row.state[k];
+    var frames = D.stacks[row.stack[k]] || [];
+    var hits = hitsOf(row.stack[k]);
+    $('dtitle').textContent = (t ? t.name : 'unknown thread')
+      + (src ? ' on cpu ' + src.coreId : '') + ' — ' + stateNames[st];
     var meta = '<div class="meta">' +
-      'thread: ' + esc(t.name) +
-      (t.javaId ? ' · javaId ' + t.javaId : '') + (t.osId ? ' · osId ' + t.osId : '') +
-      (t.group >= 0 && D.groups && D.groups[t.group] ? ' · group ' + esc(D.groups[t.group]) : '') + '<br>' +
+      'thread: ' + esc(t ? t.name : '?') +
+      (t && t.javaId ? ' · javaId ' + t.javaId : '') + (t && t.osId ? ' · osId ' + t.osId : '') +
+      (t && t.group >= 0 && D.groups && D.groups[t.group] ? ' · group ' + esc(D.groups[t.group]) : '') + '<br>' +
+      (src ? 'cpu core: ' + src.coreId + '<br>' : '') +
       'state: ' + esc(stateNames[st]) + (D.states[st].d ? ' — ' + esc(D.states[st].d) : '') + '<br>' +
-      'window: ' + fmtTime(t.start[k]) + ' → ' + fmtTime(t.end[k]) +
-      ' (' + fmtDur(t.end[k] - t.start[k]) + ')' +
-      (D.meta.startEpochMs ? ' · wall ' + fmtWall(t.start[k]) : '') + '<br>' +
-      'samples in segment: ' + fmtCount(t.samples[k]) +
+      'window: ' + fmtTime(row.start[k]) + ' → ' + fmtTime(row.end[k]) +
+      ' (' + fmtDur(row.end[k] - row.start[k]) + ')' +
+      (D.meta.startEpochMs ? ' · wall ' + fmtWall(row.start[k]) : '') + '<br>' +
+      'samples in segment: ' + fmtCount(row.samples[k]) +
       '</div>';
     var body = '';
     for (var i = 0; i < frames.length; i++) {
@@ -905,10 +1128,10 @@
 
   function pinnedStackText() {
     if (!S.pinned) { return ''; }
-    var t = S.pinned.t, k = S.pinned.k;
-    var frames = D.stacks[t.stack[k]] || [];
-    var lines = [t.name + '  [' + stateNames[t.state[k]] + ']  ' +
-      fmtTime(t.start[k]) + ' → ' + fmtTime(t.end[k])];
+    var t = S.pinned.t, k = S.pinned.k, row = S.pinned.row || t;
+    var frames = D.stacks[row.stack[k]] || [];
+    var lines = [(t ? t.name : '?') + '  [' + stateNames[row.state[k]] + ']  ' +
+      fmtTime(row.start[k]) + ' → ' + fmtTime(row.end[k])];
     for (var i = 0; i < frames.length; i++) { lines.push('  at ' + D.frames[frames[i]]); }
     return lines.join('\n');
   }
@@ -954,7 +1177,34 @@
     requestDraw();
   }
 
+  /** Switches between the thread view and the per-core view. */
+  function setView(mode) {
+    if (mode === 'cores' && !hasCores()) { return; }
+    S.view = mode;
+    var cores = mode === 'cores';
+    $('coreColor').hidden = !cores;
+    $('sort').hidden = cores;
+    $('groupWrap').hidden = cores || !hasGroups();
+    $('activeOnlyWrap').hidden = cores;
+    $('filter').disabled = cores;
+    $('filter').title = cores ? 'the filter applies to the thread view' : '';
+    $('viewMode').value = mode;
+    hideTip();
+    closeDetails();
+    rebuildRows();
+    requestDraw();
+  }
+
   function updateStatus() {
+    if (S.view === 'cores') {
+      var busy = D.cores ? D.cores.busyUs : 0;
+      $('statusLeft').textContent =
+        'view ' + fmtTime(S.t0) + ' → ' + fmtTime(S.t1) + ' (' + fmtDur(S.t1 - S.t0) + ')' +
+        '  ·  ' + coreRows.length + ' cores' +
+        '  ·  ' + (D.meta.durationUs ? (busy / D.meta.durationUs).toFixed(1) : '0') + ' busy on average' +
+        '  ·  zoom ' + (S.span / (S.t1 - S.t0)).toFixed(1) + '×';
+      return;
+    }
     var visible = S.visibleThreads.length;
     $('statusLeft').textContent =
       'view ' + fmtTime(S.t0) + ' → ' + fmtTime(S.t1) + ' (' + fmtDur(S.t1 - S.t0) + ')' +
@@ -1073,6 +1323,12 @@
         return;
       }
       if (x < S.gutterW) { hideTip(); return; }
+      if (row.core) {
+        var ck = segmentAt(row.core, x);
+        if (ck < 0) { hideTip(); return; }
+        showTip(e, threads[row.core.thread[ck]], ck, row.core);
+        return;
+      }
       var k = segmentAt(row.thread, x);
       if (k < 0) { hideTip(); return; }
       showTip(e, row.thread, k);
@@ -1108,6 +1364,11 @@
         return;
       }
       if (x < S.gutterW) { return; }
+      if (row.core) {
+        var ck = segmentAt(row.core, x);
+        if (ck >= 0) { showDetails(threads[row.core.thread[ck]], ck, row.core); }
+        return;
+      }
       var k = segmentAt(row.thread, x);
       if (k >= 0) { showDetails(row.thread, k); }
     });
@@ -1155,13 +1416,15 @@
       var chip = e.target.closest('.chip');
       if (!chip) { return; }
       var idx = +chip.dataset.s;
+      if (!isFinite(idx)) { return; }        // the "... N more" chip carries no key
       if (e.altKey || e.shiftKey) {
         soloState(idx);
         return;
       }
-      if (S.hidden.has(idx)) { S.hidden.delete(idx); } else { S.hidden.add(idx); }
+      var set = activeHiddenSet();
+      if (set.has(idx)) { set.delete(idx); } else { set.add(idx); }
       // toggle in place - re-rendering the legend would replace the element under the cursor
-      chip.classList.toggle('off', S.hidden.has(idx));
+      chip.classList.toggle('off', set.has(idx));
       overviewCache = null;
       requestDraw();
     });
@@ -1198,6 +1461,14 @@
       requestDraw();
     });
 
+    $('viewMode').addEventListener('change', function (e) { setView(e.target.value); });
+
+    $('coreColor').addEventListener('change', function (e) {
+      S.coreColor = e.target.value;
+      renderLegend();
+      requestDraw();
+    });
+
 
     $('zoomIn').addEventListener('click', function () { zoomAt((S.t0 + S.t1) / 2, 1 / 1.6); });
     $('zoomOut').addEventListener('click', function () { zoomAt((S.t0 + S.t1) / 2, 1.6); });
@@ -1227,8 +1498,11 @@
         case '0': resetZoom(); break;
         case 'f': case 'F': e.preventDefault(); $('filter').focus(); $('filter').select(); break;
         case 'n': case 'N': setAllHidden(S.hidden.size !== stateNames.length); break;
+        case 'v': case 'V':
+          if (hasCores()) { setView(S.view === 'cores' ? 'threads' : 'cores'); }
+          break;
         case 'g': case 'G':
-          if (hasGroups()) {
+          if (S.view !== 'cores' && hasGroups()) {
             S.grouped = !S.grouped;
             $('grouped').checked = S.grouped;
             rebuildRows();
@@ -1279,7 +1553,8 @@
       '<span>' + fmtCount(m.segmentCount) + ' segments</span>' +
       '<span>' + esc(m.eventTypes.join(', ')) + '</span>' +
       '<span>~' + fmtDur(m.sampleIntervalUs) + '/sample</span>' +
-      '<span>match: ' + esc(m.matchStrategy) + '</span>';
+      '<span>match: ' + esc(m.matchStrategy) + '</span>' +
+      (D.cores ? '<span>' + D.cores.ids.length + ' cpu cores</span>' : '');
 
     var sel = $('sort');
     var opts = '<option value="name">sort: name</option>' +
@@ -1298,6 +1573,9 @@
   function boot() {
     readTheme();
     renderHeader();
+    if (hasCores()) {
+      $('viewMode').hidden = false;
+    }
     if (!hasGroups()) {
       S.grouped = false;
       $('groupWrap').hidden = true;

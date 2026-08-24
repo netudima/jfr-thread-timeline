@@ -117,6 +117,39 @@ states:
       - jdk.internal.misc.Unsafe.park
 ```
 
+### The CPU core view
+
+If the recording was taken with async-profiler's `--record-cpu` (4.3+, perf-events engine on
+Linux), the `view:` dropdown offers a second layout: **one row per CPU core**, showing which
+thread occupied it over time.
+
+```bash
+asprof -e cpu --record-cpu -d 60 -f profile.jfr <pid>
+```
+
+```
+        0s        2s        4s        6s        8s
+cpu 0   ████▓▓▓▓░░░░████████▓▓▓▓░░░░████████████
+cpu 1   ▓▓▓▓████░░░░░░░░████▓▓▓▓████░░░░████████
+cpu 2   ░░░░████████▓▓▓▓████░░░░████████▓▓▓▓████
+cpu 3   ████░░░░▓▓▓▓████████████░░░░████▓▓▓▓░░░░
+
+█ SEP shared pool   ▓ Netty event loops   ░ GC
+```
+
+Colour a slice by **thread group** (default), by **thread**, or by **state**; the legend follows
+and shows each one's share of CPU time. Hover for the thread, its group, the state and the stack;
+click to pin it. The switcher only appears when the recording actually carries core ids.
+
+`--record-cpu` does not add an event field — it encodes the core as a synthetic frame in the
+stack, written into JFR as `CPU-7`. This tool looks for that frame anywhere in the stack rather
+than at a fixed end, so it keeps working if async-profiler moves it.
+
+Two things follow from how the data is sampled. A core row shows the thread that was **sampled**
+on that core, so at a 10 ms interval you see a handover sequence, not every context switch. And
+a core that ran nothing but other processes is simply absent — the profiler only sees its own
+JVM's threads.
+
 ### Thread groups
 
 Hundreds of threads is a wall of rows. `threadGroups:` buckets them by name into collapsible
@@ -295,8 +328,9 @@ worth adding.
 | alt/shift-click a chip | show **only** that state; again to bring the rest back |
 | `all` / `none` | show or hide every state at once |
 | click a group header | collapse / expand; alt-click for all groups |
+| `view:` dropdown, or `V` | switch between thread rows and CPU cores (needs `--record-cpu`) |
 | `Config` button | the configuration this report was rendered with, with a copy button |
-| `W`/`S` `A`/`D` `0` `F` `N` `G` `C` | zoom in/out, pan, reset, filter, hide all states, grouping, config |
+| `W`/`S` `A`/`D` `0` `F` `N` `G` `V` `C` | zoom in/out, pan, reset, filter, hide all states, grouping, view, config |
 
 ### The report remembers its own configuration
 
@@ -366,6 +400,7 @@ src/main/java/com/github/netudima/jfr/thread/timeline/
   Recording.java     JFR reading, frame+stack interning
   Classifier.java    stack -> coloured state
   Timeline.java      samples -> run-length encoded segments
+  CpuCores.java      --record-cpu frames -> one row per CPU core
   HtmlWriter.java    JSON serialisation and template expansion
 src/main/resources/com/github/netudima/jfr/thread/timeline/
   default-config.yaml  built-in states

@@ -238,7 +238,10 @@ public final class Main {
         String effectiveTitle = title != null ? title
                 : (config.title != null ? config.title : input.getFileName().toString());
 
+        CpuCores cores = CpuCores.build(rec, timeline, classifier, log);
+
         new HtmlWriter(config, classifier, timeline, rec, log)
+                .withCpuCores(cores)
                 .write(output, effectiveTitle, input.getFileName().toString(),
                         commandLine(args, pathArgs), compression);
 

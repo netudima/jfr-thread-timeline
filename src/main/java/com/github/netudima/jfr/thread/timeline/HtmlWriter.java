@@ -29,6 +29,7 @@ public final class HtmlWriter {
     private final Timeline timeline;
     private final Recording recording;
     private final Log log;
+    private CpuCores cores;
 
     public HtmlWriter(Config config, Classifier classifier, Timeline timeline, Recording recording, Log log) {
         this.config = config;
@@ -36,6 +37,12 @@ public final class HtmlWriter {
         this.timeline = timeline;
         this.recording = recording;
         this.log = log;
+    }
+
+    /** Adds the per-core view, when the recording was made with {@code --record-cpu}. */
+    public HtmlWriter withCpuCores(CpuCores cores) {
+        this.cores = cores;
+        return this;
     }
 
     public void write(Path output, String title, String sourceName, Compression compression) throws IOException {
@@ -152,6 +159,18 @@ public final class HtmlWriter {
                 if (stackRemap[s] < 0) {
                     stackRemap[s] = keptStacks.size();
                     keptStacks.add(s);
+                }
+            }
+        }
+        // core slices are cut differently from thread segments, so they can reference stacks no
+        // segment chose as its representative; they have to be kept too
+        if (cores != null) {
+            for (List<CpuCores.Slice> lane : cores.cores) {
+                for (CpuCores.Slice slice : lane) {
+                    if (stackRemap[slice.stack] < 0) {
+                        stackRemap[slice.stack] = keptStacks.size();
+                        keptStacks.add(slice.stack);
+                    }
                 }
             }
         }
@@ -313,6 +332,46 @@ public final class HtmlWriter {
             sb.append("]}");
         }
         sb.append(']');
+
+        if (cores != null && !cores.isEmpty()) {
+            sb.append(",\"cores\":{");
+            sb.append("\"ids\":[");
+            for (int i = 0; i < cores.coreIds.size(); i++) {
+                if (i > 0) {
+                    sb.append(',');
+                }
+                sb.append(cores.coreIds.get(i));
+            }
+            sb.append("],\"sampleCount\":").append(cores.sampleCount);
+            sb.append(",\"sliceCount\":").append(cores.sliceCount);
+            sb.append(",\"busyUs\":").append(us(cores.busyTime));
+            sb.append(",\"rows\":[");
+            for (int c = 0; c < cores.cores.size(); c++) {
+                if (c > 0) {
+                    sb.append(',');
+                }
+                sb.append('[');
+                long prevStart = 0;
+                List<CpuCores.Slice> slices = cores.cores.get(c);
+                for (int i = 0; i < slices.size(); i++) {
+                    CpuCores.Slice s = slices.get(i);
+                    long start = us(s.start);
+                    long dur = Math.max(1, us(s.end) - start);
+                    if (i > 0) {
+                        sb.append(',');
+                    }
+                    sb.append(start - prevStart).append(',')
+                      .append(dur).append(',')
+                      .append(s.thread).append(',')
+                      .append(s.state).append(',')
+                      .append(stackRemap[s.stack]).append(',')
+                      .append(s.samples);
+                    prevStart = start;
+                }
+                sb.append(']');
+            }
+            sb.append("]}");
+        }
 
         sb.append('}');
         return sb.toString();

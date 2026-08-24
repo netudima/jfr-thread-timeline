@@ -22,6 +22,8 @@ public final class Timeline {
         public final long osId;
         /** Index into {@link Timeline#groupNames}, or -1 when grouping is not configured. */
         public int group = -1;
+        /** The samples this timeline was built from; lets other views line up thread indices. */
+        Recording.ThreadSamples source;
 
         public long[] start;      // nanos relative to the recording start
         public long[] end;
@@ -113,6 +115,7 @@ public final class Timeline {
             }
             ThreadTimeline t = new ThreadTimeline(ts.name, ts.javaId, ts.osId, stateCount);
             t.group = config.groupOf(ts.name);
+            t.source = ts;
             t.sampleCount = ts.size();
             t.firstSample = ts.time(0) - base;
             t.lastSample = ts.time(ts.size() - 1) - base;
