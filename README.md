@@ -3,6 +3,13 @@
 Turns an [async-profiler](https://github.com/async-profiler/async-profiler) (or plain JDK) JFR
 recording into a single self-contained HTML page showing **what every thread was doing over time**.
 
+![Demo](docs/demo.gif)
+
+*A two-minute capture of a Cassandra node: 204 threads in collapsible groups, coloured by what they
+were doing, drag anywhere to select a time range. Then the per-core view — 16 cores, hover for the
+thread, drop a whole group from the legend, and zoom in until the individual handovers are visible.
+Click a slice for the stack behind it.*
+
 A thread's state at any instant is decided by the frames on its stack at that instant. You describe
 the states you care about in a YAML file — a name, a colour and a list of frame patterns — and each
 sample is painted with the colour of the matching state.
